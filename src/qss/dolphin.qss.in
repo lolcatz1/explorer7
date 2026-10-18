@@ -1,0 +1,86 @@
+/* explorer 7 for dolphin · pieces from win7 aero.msstyles (CommandModule, Navigation) */
+
+/* command bar */
+QToolBar#commandBar, QToolBar#commandBarRight {
+  border-image: url(@IMG@/cm-bg.png) @BG@ stretch stretch;
+  border-width: 0; margin: 0; padding: 2px 4px 3px 4px; spacing: 0; qproperty-iconSize: 16px 16px;
+}
+QToolBar#commandBarRight { qproperty-layoutDirection: RightToLeft; }
+QToolBar#commandBar QToolButton, QToolBar#commandBarRight QToolButton {
+  qproperty-layoutDirection: LeftToRight;
+  border-image: none; border: 3px solid transparent; border-top-width: 5px; border-bottom-width: 5px;
+  margin: 0; padding: 0 3px; min-height: 16px; max-height: 16px; background: transparent;
+  color: #1e395b; font-family: "Segoe UI"; font-size: 9pt;
+}
+QToolBar#commandBar QToolButton:hover, QToolBar#commandBarRight QToolButton:hover { border-image: url(@IMG@/cm-hot.png) @TB@ stretch stretch; }
+QToolBar#commandBar QToolButton:pressed, QToolBar#commandBarRight QToolButton:pressed,
+QToolBar#commandBar QToolButton:checked, QToolBar#commandBarRight QToolButton:checked { border-image: url(@IMG@/cm-pressed.png) @TB@ stretch stretch; }
+QToolBar#commandBar QToolButton:disabled, QToolBar#commandBarRight QToolButton:disabled { color: #cccccc; }
+QToolBar#commandBar QToolButton[popupMode="InstantPopup"], QToolBar#commandBar QToolButton[popupMode="2"] { padding-right: 15px; }
+QToolBar#commandBar QToolButton::menu-indicator, QToolBar#commandBarRight QToolButton::menu-indicator {
+  image: url(@IMG@/cm-menuglyph.png); subcontrol-origin: padding; subcontrol-position: right center; width: 13px; height: 10px; right: 1px;
+}
+QToolBar#commandBar QToolButton::menu-indicator:pressed, QToolBar#commandBar QToolButton::menu-indicator:open { top: 0; left: 0; }
+QToolBar#commandBar QToolBarExtension, QToolBar#commandBarRight QToolBarExtension { qproperty-icon: url(@IMG@/cm-overflow.png); }
+
+/* back / forward: explorer's travel band with the orb pair; the band's arrow = forward's menu part (recent pages) */
+QToolBar#mainToolBar QToolButton[text="Back"], QToolBar#mainToolBar QToolButton[text="Forward"] {
+  qproperty-icon: url(@IMG@/none.png); border: 0; padding: 0; margin: 0; min-height: 29px; max-height: 29px; background: transparent;
+}
+QToolBar#mainToolBar QToolButton[text="Back"] { border-image: url(@IMG@/back-1.png); min-width: 27px; max-width: 27px; margin-left: 6px; }
+QToolBar#mainToolBar QToolButton[text="Back"]:hover { border-image: url(@IMG@/back-2.png); }
+QToolBar#mainToolBar QToolButton[text="Back"]:pressed { border-image: url(@IMG@/back-3.png); }
+QToolBar#mainToolBar QToolButton[text="Back"]:disabled { border-image: url(@IMG@/back-4.png); }
+QToolBar#mainToolBar QToolButton[text="Back"]::menu-indicator { image: none; width: 0; }
+QToolBar#mainToolBar QToolButton[text="Forward"] { qproperty-popupMode: MenuButtonPopup; border-image: url(@IMG@/fwd-1.png); min-width: 27px; max-width: 27px; padding-right: 16px; }
+QToolBar#mainToolBar QToolButton[text="Forward"]:hover { border-image: url(@IMG@/fwd-2.png); }
+QToolBar#mainToolBar QToolButton[text="Forward"]:pressed { border-image: url(@IMG@/fwd-3.png); }
+QToolBar#mainToolBar QToolButton[text="Forward"]:disabled { border-image: url(@IMG@/fwd-4.png); }
+QToolBar#mainToolBar QToolButton[text="Forward"]::menu-button { border: 0; width: 16px; background: transparent; image: none; }
+QToolBar#mainToolBar QToolButton[text="Forward"]::menu-button:hover { border-image: url(@IMG@/recent-2.png); }
+QToolBar#mainToolBar QToolButton[text="Forward"]::menu-button:pressed, QToolBar#mainToolBar QToolButton[text="Forward"]::menu-button:open { border-image: url(@IMG@/recent-3.png); }
+QToolBar#mainToolBar QToolButton[text="Forward"]::menu-arrow { image: none; }
+
+/* address box (AB::AddressBand): only rows 0-2 / 20-22 are border, the inside is translucent white */
+QToolBar#mainToolBar QSplitter {
+  border-image: url(@IMG@/ab-left-1.png) 3 2 3 3 stretch stretch; border-width: 3px 2px 3px 3px; padding: 0 0 0 2px; margin: 0 2px 0 6px; min-height: 17px; max-height: 17px;
+}
+QToolBar#mainToolBar QSplitter:hover { border-image: url(@IMG@/ab-left-2.png) 3 2 3 3 stretch stretch; }
+QToolBar#mainToolBar KUrlNavigator { max-height: 17px; }
+
+/* search box (SearchBox) on dolphin's search toggle */
+QToolBar#mainToolBar QToolButton[e7search="true"] {
+  qproperty-toolButtonStyle: ToolButtonTextBesideIcon; qproperty-layoutDirection: RightToLeft; qproperty-iconSize: 16px 16px;
+  border-image: url(@IMG@/sb-1.png) @SB@ stretch stretch; border-width: 5px 5px 5px 3px; padding: 0 1px 0 4px; margin: 0 6px 0 2px;
+  min-width: 192px; max-width: 192px; min-height: 13px; max-height: 13px; text-align: left;
+  color: #6d6d6d; font-style: italic; font-family: "Segoe UI"; font-size: 9pt;
+}
+QToolBar#mainToolBar QToolButton[e7search="true"]:hover { border-image: url(@IMG@/sb-2.png) @SB@ stretch stretch; }
+QToolBar#mainToolBar QToolButton[e7search="true"]:checked, QToolBar#mainToolBar QToolButton[e7search="true"]:pressed { border-image: url(@IMG@/sb-3.png) @SB@ stretch stretch; }
+
+/* address row: explorer packs the orbs edge to edge */
+QToolBar#mainToolBar { spacing: 0px; padding: 0px; }
+QToolBar#mainToolBar { background: transparent; border: none; }
+
+/* body: no frames around the views, explorer's pane divider */
+QTabWidget::pane { border: 0px; padding: 0px; margin: 0px; }
+KItemListContainer { border: 0px; }
+QMainWindow::separator { background: white; width: 3px; height: 0px; border-image: url(@IMG@/navpanesizer.png) 0 0 0 1 stretch stretch; }
+QToolButton#addr-drop, QToolButton#addr-refresh { border: 0; padding: 0; margin: 0; background: transparent; }
+QToolButton#addr-refresh { border-left: 1px solid rgba(160, 175, 195, 120); }
+QToolButton#addr-refresh:hover, QToolButton#addr-drop:hover { border-image: url(@IMG@/cm-hot.png) 6 3 6 3 stretch stretch; }
+
+/* menu bar row under the address bar (ExplorerBar::Rebar band, Menu baritem frames) */
+QToolBar#e7MenuBar { background: @MENUBAR_GRAD@; border: 0; padding: 0; margin: 0; spacing: 0; }
+QToolBar#e7MenuBar QMenuBar { background: transparent; border: 0; padding: 0; margin: 0; spacing: 0; font-family: "Segoe UI"; font-size: 9pt; }
+QToolBar#e7MenuBar QMenuBar::item { background: transparent; color: #000000; padding: 2px 7px 3px 7px; margin: 0; border: 0; }
+QToolBar#e7MenuBar QMenuBar::item:selected { border-image: url(@IMG@/menu-item-2.png) 4 4 4 4 stretch stretch; }
+QToolBar#e7MenuBar QMenuBar::item:pressed { border-image: url(@IMG@/menu-item-3.png) 4 4 4 4 stretch stretch; }
+
+/* address row spacing measured on windows 7: band 6px from the frame, box 3px after the arrow, search box 6px from the right */
+QToolBar#mainToolBar { padding: 3px 6px 3px 6px; spacing: 0px; }
+QToolBar#mainToolBar QSplitter { margin-left: 2px; margin-right: 0px; }
+QToolBar#mainToolBar QToolButton#e7Refresh { border-image: url(@IMG@/ab-right-1.png) 3 3 3 1 stretch stretch; border-width: 3px 3px 3px 1px; padding: 0; margin: 0 4px 0 0; background: transparent; }
+QToolBar#mainToolBar QToolButton#e7Refresh:hover { border-image: url(@IMG@/ab-right-2.png) 3 3 3 1 stretch stretch; }
+QToolBar#mainToolBar QToolButton#e7Refresh:pressed { border-image: url(@IMG@/ab-right-3.png) 3 3 3 1 stretch stretch; }
+E7SearchBox { margin: 0; padding: 0; border: none; background: transparent; color: #000000; selection-background-color: #3399ff; }

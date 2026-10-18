@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Windows Explorer
+GenericName=File Explorer
+Comment=Displays the files and folders on your computer.
+Exec=@BIN@ %u
+Icon=explorer7
+Categories=Utility;System;FileTools;
+Keywords=explorer;file explorer;windows explorer;files;folders;dolphin;
+StartupWMClass=dolphin
+X-DBUS-ServiceName=org.kde.dolphin

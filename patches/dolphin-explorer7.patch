@@ -1,0 +1,1593 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 319c551..cb7619f 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -292,6 +292,11 @@ target_sources(dolphinstatic PRIVATE
+     dolphinbookmarkhandler.cpp
+     dolphindockwidget.cpp
+     dolphinmainwindow.cpp
++    explorer7/e7assets.cpp
++    explorer7/e7navpane.cpp
++    explorer7/e7detailspane.cpp
++    explorer7/e7breadcrumb.cpp
++    explorer7/e7navbar.cpp
+     dolphinviewcontainer.cpp
+     dolphincontextmenu.cpp
+     dolphinnavigatorswidgetaction.cpp
+diff --git a/src/dolphinmainwindow.cpp b/src/dolphinmainwindow.cpp
+index a29fe0d..2c4a6bd 100644
+--- a/src/dolphinmainwindow.cpp
++++ b/src/dolphinmainwindow.cpp
+@@ -25,6 +25,25 @@
+ #include "middleclickactioneventfilter.h"
+ #include "panels/folders/folderspanel.h"
+ #include "panels/places/placespanel.h"
++#include "explorer7/e7detailspane.h"
++#include "explorer7/e7navpane.h"
++#include "explorer7/e7navbar.h"
++#include "search/bar.h"
++#include <QToolButton>
++#include <QLayout>
++#include <QWidgetAction>
++#include "explorer7/e7assets.h"
++#include <KApplicationTrader>
++#include <KActionMenu>
++#include <KIO/JobUiDelegateFactory>
++#include <KIO/OpenUrlJob>
++#include <QMenu>
++#include <QMenuBar>
++#include <QProcess>
++#include <QDockWidget>
++#include <KToolBar>
++#include <KWindowEffects>
++#include <QPainter>
+ #include "panels/terminal/terminalpanel.h"
+ #include "search/dolphinquery.h"
+ #include "selectionmode/actiontexthelper.h"
+@@ -136,6 +155,8 @@ DolphinMainWindow::DolphinMainWindow()
+     , m_sessionSaveWatcher(nullptr)
+     , m_sessionSaveScheduled(false)
+ {
++    setAttribute(Qt::WA_TranslucentBackground); // explorer7: glass address row
++
+     Q_INIT_RESOURCE(dolphin);
+ 
+     new MainWindowAdaptor(this);
+@@ -211,6 +232,9 @@ DolphinMainWindow::DolphinMainWindow()
+ 
+     const bool usePhoneUi{KRuntimePlatform::runtimePlatform().contains(QLatin1String("phone"))};
+     setupGUI(Save | Create | ToolBar, usePhoneUi ? QStringLiteral("dolphinuiforphones.rc") : QString() /* load the default dolphinui.rc file */);
++    e7SetupMenuBar(); // explorer7
++    // explorer7: the address row packs its pieces with explorer's own gaps (set per item), no toolbar spacing
++    if (KToolBar *tb = findChild<KToolBar *>(QStringLiteral("mainToolBar")); tb && tb->layout()) tb->layout()->setSpacing(0);
+     stateChanged(QStringLiteral("new_file"));
+ 
+     QClipboard *clipboard = QApplication::clipboard();
+@@ -404,6 +428,23 @@ void DolphinMainWindow::slotEditableStateChanged(bool editable)
+ void DolphinMainWindow::slotSelectionChanged(const KFileItemList &selection)
+ {
+     updateFileAndEditActions();
++    if (QAction *o = actionCollection()->action(QStringLiteral("e7_open"))) {
++        o->setVisible(!selection.isEmpty()); // explorer7
++        // explorer shows the program that will open the selection: itself for folders, the default app for files
++        bool allDirs = !selection.isEmpty();
++        for (const KFileItem &item : selection) allDirs &= item.isDir();
++        QIcon icon = E7::icon(QStringLiteral("explorer"));
++        if (!allDirs && !selection.isEmpty()) {
++            const KService::Ptr app = KApplicationTrader::preferredService(selection.first().mimetype());
++            if (app) icon = QIcon::fromTheme(app->icon());
++        }
++        o->setIcon(icon);
++    }
++    if (QAction *m = actionCollection()->action(QStringLiteral("e7_email"))) {
++        bool files = false;
++        for (const KFileItem &item : selection) files |= !item.isDir();
++        m->setVisible(files);
++    }
+ 
+     if (m_fileItemActions) {
+         if (selection.count() > 0) {
+@@ -600,6 +641,9 @@ void DolphinMainWindow::showTarget()
+ 
+ bool DolphinMainWindow::event(QEvent *event)
+ {
++    if (event->type() == QEvent::Resize || event->type() == QEvent::Show || event->type() == QEvent::LayoutRequest || event->type() == QEvent::WinIdChange) {
++        e7UpdateGlass();
++    }
+     if (event->type() == QEvent::ShortcutOverride) {
+         const QKeyEvent *keyEvent = static_cast<QKeyEvent *>(event);
+         if (keyEvent->key() == Qt::Key_Space && m_activeViewContainer->view()->handleSpaceAsNormalKey()) {
+@@ -928,10 +972,33 @@ void DolphinMainWindow::paste()
+ 
+ void DolphinMainWindow::find()
+ {
++    // explorer7: ctrl+f / search go to the search box in the address row
++    if (auto *box = findChild<E7SearchBox *>(QStringLiteral("e7SearchBox"))) {
++        box->setFocus(Qt::ShortcutFocusReason);
++        box->selectAll();
++        return;
++    }
+     m_activeViewContainer->setSearchBarVisible(true);
+     m_activeViewContainer->setFocusToSearchBar();
+ }
+ 
++void DolphinMainWindow::e7Search(const QString &text, bool commit)
++{
++    if (!m_activeViewContainer) return;
++    if (text.isEmpty()) {
++        m_activeViewContainer->setSearchBarVisible(false);
++        return;
++    }
++    if (!m_activeViewContainer->isSearchBarVisible()) m_activeViewContainer->setSearchBarVisible(true);
++    if (auto *bar = m_activeViewContainer->findChild<Search::Bar *>()) {
++        if (auto *edit = bar->findChild<QLineEdit *>()) {
++            edit->setText(text);
++            Q_EMIT edit->textEdited(text);
++            if (commit) Q_EMIT edit->returnPressed();
++        }
++    }
++}
++
+ void DolphinMainWindow::updateSearchAction()
+ {
+     QAction *toggleSearchAction = actionCollection()->action(QStringLiteral("toggle_search"));
+@@ -1717,10 +1784,28 @@ void DolphinMainWindow::tabCountChanged(int count)
+ 
+ void DolphinMainWindow::updateWindowTitle()
+ {
++    if (QAction *o = actionCollection()->action(QStringLiteral("e7_open")); o && m_activeViewContainer) {
++        o->setVisible(!m_activeViewContainer->view()->selectedItems().isEmpty());
++    }
+     const QString newTitle = m_activeViewContainer->captionWindowTitle();
+     if (windowTitle() != newTitle) {
+         setWindowTitle(newTitle);
+     }
++    // explorer7: "Search <folder>" in the search box
++    if (QAction *search = actionCollection()->action(QStringLiteral("toggle_search"))) {
++        search->setIconText(i18n("Search %1", m_activeViewContainer->captionWindowTitle()));
++        if (auto *box = findChild<E7SearchBox *>(QStringLiteral("e7SearchBox")); box && !Search::isSupportedSearchScheme(m_activeViewContainer->url().scheme())) {
++            box->setPrompt(i18n("Search %1", m_activeViewContainer->captionWindowTitle()));
++            if (!box->hasFocus()) box->clear();
++        }
++        if (const KToolBar *tb = findChild<KToolBar *>(QStringLiteral("mainToolBar"))) {
++            if (QWidget *w = tb->widgetForAction(search); w && !w->property("e7search").toBool()) {
++                w->setProperty("e7search", true);
++                w->style()->unpolish(w);
++                w->style()->polish(w);
++            }
++        }
++    }
+ }
+ 
+ void DolphinMainWindow::slotStorageTearDownFromPlacesRequested(const QString &mountPath)
+@@ -2503,11 +2588,34 @@ void DolphinMainWindow::setupDockWidgets()
+ 
+     m_placesPanel = new PlacesPanel(placesDock);
+     m_placesPanel->setCustomContextMenuActions({lockLayoutAction});
+-    placesDock->setWidget(m_placesPanel);
++    // explorer7: the dock shows windows 7's navigation pane; dolphin's places panel stays alive (hidden) for its signals
++    auto *e7nav = new E7NavPane(placesDock);
++    placesDock->setWidget(e7nav);
++    m_placesPanel->hide();
++    connect(e7nav, &E7NavPane::placeActivated, this, &DolphinMainWindow::slotPlaceActivated);
++    connect(this, &DolphinMainWindow::urlChanged, e7nav, &E7NavPane::setUrl);
+ 
+     createPanelAction(QIcon::fromTheme(QStringLiteral("compass")), Qt::Key_F9, placesDock, QStringLiteral("show_places_panel"));
+ 
+     addDockWidget(Qt::LeftDockWidgetArea, placesDock);
++
++    // explorer7: details pane across the whole bottom of the window
++    auto *e7detailsDock = new QDockWidget(this);
++    e7detailsDock->setObjectName(QStringLiteral("e7DetailsDock"));
++    e7detailsDock->setTitleBarWidget(new QWidget(e7detailsDock));
++    e7detailsDock->setFeatures(QDockWidget::NoDockWidgetFeatures);
++    e7detailsDock->setAllowedAreas(Qt::BottomDockWidgetArea);
++    auto *e7details = new E7DetailsPane(e7detailsDock);
++    e7detailsDock->setWidget(e7details);
++    setCorner(Qt::BottomLeftCorner, Qt::BottomDockWidgetArea);
++    setCorner(Qt::BottomRightCorner, Qt::BottomDockWidgetArea);
++    addDockWidget(Qt::BottomDockWidgetArea, e7detailsDock);
++    connect(this, &DolphinMainWindow::activeViewChanged, e7details, [e7details](DolphinViewContainer *c) {
++        e7details->setView(c ? c->view() : nullptr);
++    });
++    QTimer::singleShot(0, e7details, [this, e7details]() {
++        if (DolphinViewContainer *c = activeViewContainer()) e7details->setView(c->view());
++    });
+     connect(m_placesPanel, &PlacesPanel::placeActivated, this, &DolphinMainWindow::slotPlaceActivated);
+     connect(m_placesPanel, &PlacesPanel::tabRequested, this, &DolphinMainWindow::openNewTab);
+     connect(m_placesPanel, &PlacesPanel::activeTabRequested, this, &DolphinMainWindow::openNewTabAndActivate);
+@@ -2589,6 +2697,106 @@ void DolphinMainWindow::setupDockWidgets()
+     connect(panelsMenu->menu(), &QMenu::aboutToShow, this, [actionShowAllPlaces] {
+         actionShowAllPlaces->setEnabled(DolphinPlacesModelSingleton::instance().placesModel()->hiddenCount());
+     });
++
++    // explorer7: windows 7's organize menu, built from dolphin's own actions --------------------
++    KActionCollection *e7ac = actionCollection();
++    auto *organize = new KActionMenu(i18nc("@action", "Organize"), this);
++    organize->setPopupMode(QToolButton::InstantPopup);
++    e7ac->addAction(QStringLiteral("e7_organize"), organize);
++    QMenu *om = organize->menu();
++    const auto add = [e7ac](QMenu *m, const char *name, const QString &text = QString()) {
++        if (QAction *a = e7ac->action(QLatin1String(name))) {
++            if (!text.isEmpty()) a->setText(text);
++            m->addAction(a);
++        }
++    };
++    add(om, "edit_cut"); add(om, "edit_copy"); add(om, "edit_paste");
++    om->addSeparator();
++    add(om, "edit_undo"); add(om, "edit_redo");
++    om->addSeparator();
++    add(om, "edit_select_all", i18nc("@action", "Select all"));
++    om->addSeparator();
++    QMenu *layoutMenu = om->addMenu(i18nc("@action", "Layout"));
++    QAction *e7menubar = e7ac->addAction(QStringLiteral("e7_menubar"));
++    e7menubar->setText(i18nc("@action", "Menu bar"));
++    e7menubar->setCheckable(true);
++    layoutMenu->addAction(e7menubar);
++    QAction *detailsToggle = findChild<QDockWidget *>(QStringLiteral("e7DetailsDock"))->toggleViewAction();
++    detailsToggle->setText(i18nc("@action", "Details pane"));
++    e7ac->addAction(QStringLiteral("e7_details_pane"), detailsToggle);
++    layoutMenu->addAction(detailsToggle);
++    add(layoutMenu, "show_information_panel", i18nc("@action", "Preview pane"));
++    add(layoutMenu, "show_places_panel", i18nc("@action", "Navigation pane"));
++    add(om, "options_configure", i18nc("@action", "Folder and search options"));
++    om->addSeparator();
++    add(om, "movetotrash", i18nc("@action", "Delete"));
++    add(om, "renamefile", i18nc("@action", "Rename"));
++    om->addSeparator();
++    add(om, "properties", i18nc("@action", "Properties"));
++    om->addSeparator();
++    QAction *closeWindow = e7ac->addAction(QStringLiteral("e7_close"));
++    closeWindow->setText(i18nc("@action", "Close"));
++    connect(closeWindow, &QAction::triggered, this, &QWidget::close);
++    om->addAction(closeWindow);
++
++    // explorer7: travel band and search box of the address row
++    auto *travel = new QWidgetAction(this);
++    travel->setText(i18nc("@action", "Back and Forward"));
++    travel->setDefaultWidget(new E7TravelBand(e7ac->action(QStringLiteral("go_back")), e7ac->action(QStringLiteral("go_forward"))));
++    e7ac->addAction(QStringLiteral("e7_travel"), travel);
++    // refresh: its own box joined to the address box
++    auto *refreshAction = new QWidgetAction(this);
++    refreshAction->setText(i18nc("@action", "Refresh"));
++    auto *refreshButton = new QToolButton();
++    refreshButton->setObjectName(QStringLiteral("e7Refresh"));
++    refreshButton->setIcon(QIcon(E7::pixmap(QStringLiteral("addr-refresh"))));
++    refreshButton->setIconSize(QSize(16, 16));
++    refreshButton->setFixedSize(29, 23); // 25px box + the gap before the search box (qss margin; measured 7px with its glow)
++    refreshButton->setToolTip(i18nc("@info:tooltip", "Refresh"));
++    refreshButton->setFocusPolicy(Qt::NoFocus);
++    connect(refreshButton, &QToolButton::clicked, this, [e7ac]() {
++        if (QAction *a = e7ac->action(QStringLiteral("view_redisplay"))) a->trigger();
++    });
++    refreshAction->setDefaultWidget(refreshButton);
++    e7ac->addAction(QStringLiteral("e7_refresh"), refreshAction);
++    auto *searchAction = new QWidgetAction(this);
++    searchAction->setText(i18nc("@action", "Search Box"));
++    auto *searchBox = new E7SearchBox();
++    searchAction->setDefaultWidget(searchBox);
++    e7ac->addAction(QStringLiteral("e7_search"), searchAction);
++    connect(searchBox, &QLineEdit::textEdited, this, [this](const QString &t) { e7Search(t, false); });
++    connect(searchBox, &QLineEdit::returnPressed, this, [this, searchBox]() { e7Search(searchBox->text(), true); });
++
++    // explorer7: "E-mail" for selected files (mail client via xdg-email)
++    QAction *e7mail = e7ac->addAction(QStringLiteral("e7_email"));
++    e7mail->setText(i18nc("@action", "E-mail"));
++    e7mail->setVisible(false);
++    connect(e7mail, &QAction::triggered, this, [this]() {
++        if (!m_activeViewContainer) return;
++        QStringList args;
++        for (const KFileItem &item : m_activeViewContainer->view()->selectedItems()) {
++            if (item.isLocalFile() && !item.isDir()) args << QStringLiteral("--attach") << item.localPath();
++        }
++        if (!args.isEmpty()) QProcess::startDetached(QStringLiteral("xdg-email"), args);
++    });
++
++    // explorer7: "Open" appears in the command bar while something is selected
++    QAction *e7open = e7ac->addAction(QStringLiteral("e7_open"));
++    e7open->setText(i18nc("@action", "Open"));
++    e7open->setVisible(false);
++    connect(e7open, &QAction::triggered, this, [this]() {
++        if (!m_activeViewContainer) return;
++        const KFileItemList items = m_activeViewContainer->view()->selectedItems();
++        if (items.count() == 1 && items.first().isDir()) {
++            changeUrl(items.first().targetUrl());
++            return;
++        }
++        for (const KFileItem &item : items) {
++            auto *job = new KIO::OpenUrlJob(item.targetUrl(), item.mimetype());
++            job->setUiDelegate(KIO::createDefaultJobUiDelegate(KJobUiDelegate::AutoHandlingEnabled, this));
++            job->start();
++        }
++    });
+ }
+ 
+ void DolphinMainWindow::setupFileItemActions()
+@@ -3230,3 +3438,86 @@ void DolphinMainWindow::slotDoubleClickViewBackground(Qt::MouseButton button)
+ }
+ 
+ #include "moc_dolphinmainwindow.cpp"
++
++// explorer7: glass address row ---------------------------------------------
++QRect DolphinMainWindow::e7GlassRect() const
++{
++    const KToolBar *tb = findChild<KToolBar *>(QStringLiteral("mainToolBar"));
++    if (!tb || !tb->isVisible() || toolBarArea(const_cast<KToolBar *>(tb)) != Qt::TopToolBarArea) {
++        return {};
++    }
++    return QRect(0, 0, width(), tb->geometry().bottom() + 1);
++}
++
++void DolphinMainWindow::e7UpdateGlass()
++{
++    if (QWindow *w = windowHandle()) {
++        const QRect glass = e7GlassRect();
++        KWindowEffects::enableBlurBehind(w, !glass.isEmpty(), QRegion(glass));
++    }
++    update();
++}
++
++void DolphinMainWindow::paintEvent(QPaintEvent *event)
++{
++    QPainter p(this);
++    p.setCompositionMode(QPainter::CompositionMode_Source);
++    p.fillRect(rect(), Qt::white); // explorer's body is white between the panes
++    const QRect glass = e7GlassRect();
++    if (!glass.isEmpty()) {
++        p.fillRect(glass, Qt::transparent);
++    }
++    p.end();
++    KXmlGuiWindow::paintEvent(event);
++}
++
++// explorer7: windows 7 shows its menu bar under the address row, a qt menu bar always sits above the toolbars;
++// so a toolbar row holds a second menu bar sharing dolphin's menus and the real one stays hidden
++void DolphinMainWindow::e7SetupMenuBar()
++{
++    QMenuBar *real = menuBar();
++    auto *row = new QToolBar(i18nc("@title:window", "Menu Bar"), this);
++    row->setObjectName(QStringLiteral("e7MenuBar"));
++    row->setMovable(false);
++    row->setFloatable(false);
++    row->toggleViewAction()->setVisible(false);
++    auto *bar = new QMenuBar(row);
++    bar->setNativeMenuBar(false);
++    const auto tops = real->actions();
++    for (QAction *a : tops) {
++        const QString name = a->menu() ? a->menu()->objectName() : QString();
++        if (name == QLatin1String("go") || name == QLatin1String("settings")) continue; // explorer: File Edit View Tools Help
++        bar->addAction(a);
++    }
++    row->addWidget(bar);
++    if (KToolBar *cmd = findChild<KToolBar *>(QStringLiteral("commandBar"))) {
++        insertToolBar(cmd, row);
++        insertToolBarBreak(cmd);
++        insertToolBarBreak(row);
++    } else {
++        addToolBarBreak();
++        addToolBar(row);
++    }
++    real->hide();
++    real->installEventFilter(this);
++    m_e7MenuRow = row;
++    if (QAction *show = actionCollection()->action(QStringLiteral("e7_menubar"))) {
++        show->setChecked(KSharedConfig::openConfig()->group(QStringLiteral("Explorer7")).readEntry("MenuBar", true));
++        row->setVisible(show->isChecked());
++        connect(show, &QAction::toggled, this, [row](bool on) {
++            row->setVisible(on);
++            KConfigGroup g = KSharedConfig::openConfig()->group(QStringLiteral("Explorer7"));
++            g.writeEntry("MenuBar", on);
++            g.sync();
++        });
++    }
++}
++
++bool DolphinMainWindow::eventFilter(QObject *watched, QEvent *event)
++{
++    // explorer7: the menus live in the row under the address bar; dolphin's own menu bar stays hidden
++    if (watched == menuBar() && event->type() == QEvent::Show) {
++        QTimer::singleShot(0, menuBar(), &QWidget::hide);
++    }
++    return KXmlGuiWindow::eventFilter(watched, event);
++}
+diff --git a/src/dolphinmainwindow.h b/src/dolphinmainwindow.h
+index 50e944f..a83df36 100644
+--- a/src/dolphinmainwindow.h
++++ b/src/dolphinmainwindow.h
+@@ -28,6 +28,7 @@
+ #include <QList>
+ #include <QMenu>
+ #include <QPointer>
++#include <QToolBar>
+ #include <QUrl>
+ #include <QVector>
+ 
+@@ -270,6 +271,8 @@ Q_SIGNALS:
+ protected:
+     /** @see QObject::event() */
+     bool event(QEvent *event) override;
++    void paintEvent(QPaintEvent *event) override; // explorer7: glass address row
++    bool eventFilter(QObject *watched, QEvent *event) override; // explorer7: keeps the real menu bar hidden
+ 
+     /** @see QWidget::showEvent() */
+     void showEvent(QShowEvent *event) override;
+@@ -763,6 +766,13 @@ private:
+     static QAction *urlNavigatorHistoryAction(const KUrlNavigator *urlNavigator, int historyIndex, QObject *parent = nullptr);
+ 
+ private:
++    // explorer7: the address row sits on aero glass like windows 7 explorer
++    QRect e7GlassRect() const;
++    void e7SetupMenuBar();
++    void e7Search(const QString &text, bool commit);
++    QPointer<QToolBar> m_e7MenuRow;
++    void e7UpdateGlass();
++
+     /**
+      * Implements a custom error handling for the undo manager. This
+      * assures that all errors are shown as a message box above the view,
+diff --git a/src/dolphinnavigatorswidgetaction.cpp b/src/dolphinnavigatorswidgetaction.cpp
+index 184530b..d1c1758 100644
+--- a/src/dolphinnavigatorswidgetaction.cpp
++++ b/src/dolphinnavigatorswidgetaction.cpp
+@@ -5,6 +5,11 @@
+     SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+ */
+ 
++#include "explorer7/e7assets.h"
++#include <KActionCollection>
++#include <KUrlComboBox>
++#include <KXmlGuiWindow>
++#include <QToolButton>
+ #include "dolphinnavigatorswidgetaction.h"
+ 
+ #include "trash/dolphintrash.h"
+@@ -51,7 +56,7 @@ void DolphinNavigatorsWidgetAction::adjustSpacing()
+     m_splitter->setSizes(splitterSizes);
+ 
+     // primary side of m_splitter
+-    int leadingSpacing = viewGeometries.globalXOfPrimary - viewGeometries.globalXOfNavigatorsWidget;
++    int leadingSpacing = 0; // explorer7: explorer starts the breadcrumbs at the box edge
+     if (leadingSpacing < 0) {
+         leadingSpacing = 0;
+     }
+@@ -181,6 +186,11 @@ QWidget *DolphinNavigatorsWidgetAction::createWidget(QWidget *parent)
+         }
+     }
+     m_splitter->setParent(parent);
++    if (qobject_cast<QToolBar *>(parent)) {
++        // explorer7: the address box is exactly as tall as the search box (AB::AddressBand / SearchBox, 23px)
++        m_splitter->setFixedHeight(23);
++        m_splitter->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
++    }
+     return m_splitter.get();
+ }
+ 
+@@ -239,6 +249,28 @@ QWidget *DolphinNavigatorsWidgetAction::createNavigatorWidget(Side side) const
+ 
+     auto trailingSpacing = new QWidget{navigatorWidget};
+     layout->addWidget(trailingSpacing);
++
++    // explorer7: the address box ends with a history drop-down and a refresh button (ExplorerFrame glyphs)
++    if (side == Primary) {
++        auto glyphButton = [navigatorWidget](const QString &name, const QString &tip) {
++            auto *b = new QToolButton(navigatorWidget);
++            b->setObjectName(name);
++            b->setAutoRaise(true);
++            b->setToolTip(tip);
++            b->setIcon(QIcon(E7::pixmap(name)));
++            b->setIconSize(QSize(16, 16));
++            b->setFixedSize(name == QLatin1String("addr-drop") ? QSize(15, 17) : QSize(22, 17));
++            b->setFocusPolicy(Qt::NoFocus);
++            return b;
++        };
++        auto *drop = glyphButton(QStringLiteral("addr-drop"), i18n("Previous Locations"));
++        layout->addWidget(drop);
++        connect(drop, &QToolButton::clicked, urlNavigator, [urlNavigator]() {
++            urlNavigator->setUrlEditable(true);
++            if (auto *combo = urlNavigator->editor()) combo->showPopup();
++        });
++
++    }
+     return navigatorWidget;
+ }
+ 
+diff --git a/src/dolphinurlnavigator.cpp b/src/dolphinurlnavigator.cpp
+index 5c32538..9cfadfb 100644
+--- a/src/dolphinurlnavigator.cpp
++++ b/src/dolphinurlnavigator.cpp
+@@ -5,6 +5,7 @@
+     SPDX-License-Identifier: LGPL-2.1-only OR LGPL-3.0-only OR LicenseRef-KDE-Accepted-LGPL
+ */
+ 
++#include "explorer7/e7breadcrumb.h"
+ #include "dolphinurlnavigator.h"
+ 
+ #include "dolphin_generalsettings.h"
+@@ -33,7 +34,8 @@ DolphinUrlNavigator::DolphinUrlNavigator(const QUrl &url, QWidget *parent)
+     setUrlEditable(settings->editableUrl());
+     setShowFullPath(settings->showFullPath());
+     setHomeUrl(Dolphin::homeUrl());
+-    setPlacesSelectorVisible(DolphinUrlNavigatorsController::placesSelectorVisible());
++    setPlacesSelectorVisible(true); // explorer7: folder icon at the start of the address box
++    new E7Breadcrumb(this);
+     editor()->setCompletionMode(KCompletion::CompletionMode(settings->urlCompletionMode()));
+     setWhatsThis(xi18nc("@info:whatsthis location bar",
+                         "<para>This describes the location of the files and folders "
+diff --git a/src/dolphinurlnavigatorscontroller.cpp b/src/dolphinurlnavigatorscontroller.cpp
+index 9405bb8..cb9cc9c 100644
+--- a/src/dolphinurlnavigatorscontroller.cpp
++++ b/src/dolphinurlnavigatorscontroller.cpp
+@@ -34,7 +34,7 @@ void DolphinUrlNavigatorsController::slotPlacesPanelVisibilityChanged(bool visib
+     s_placesSelectorVisible = !visible;
+ 
+     for (DolphinUrlNavigator *urlNavigator : s_instances) {
+-        urlNavigator->setPlacesSelectorVisible(s_placesSelectorVisible);
++        urlNavigator->setPlacesSelectorVisible(true); // explorer7
+     }
+ }
+ 
+diff --git a/src/dolphinviewcontainer.cpp b/src/dolphinviewcontainer.cpp
+index 968919b..353f412 100644
+--- a/src/dolphinviewcontainer.cpp
++++ b/src/dolphinviewcontainer.cpp
+@@ -353,7 +353,9 @@ void DolphinViewContainer::setSearchBarVisible(bool visible)
+                     m_statusBar->showProgress(currentlyRunningTaskTitle, installationProgressPercent, DolphinStatusBar::CancelLoading::Disallowed);
+                 });
+         connect(m_searchBar, &Search::Bar::visibilityChanged, this, &DolphinViewContainer::searchBarVisibilityChanged);
+-        m_topLayout->addWidget(m_searchBar, positionFor.searchBar, 0);
++        // explorer7: the bar's logic is driven from the explorer search box; it stays out of the layout, zero sized
++        m_searchBar->setGeometry(-100, -100, 1, 1);
++        m_searchBar->setFixedSize(1, 1);
+     }
+ 
+     m_searchBar->setVisible(true, WithAnimation);
+diff --git a/src/explorer7/e7assets.cpp b/src/explorer7/e7assets.cpp
+new file mode 100644
+index 0000000..f71e512
+--- /dev/null
++++ b/src/explorer7/e7assets.cpp
+@@ -0,0 +1,64 @@
++#include "e7assets.h"
++#include <QDir>
++#include <QHash>
++#include <QPainter>
++#include <QStandardPaths>
++
++namespace E7
++{
++QString imgDir()
++{
++    return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + QStringLiteral("/explorer7/img/");
++}
++
++QPixmap pixmap(const QString &name)
++{
++    static QHash<QString, QPixmap> cache;
++    auto it = cache.find(name);
++    if (it != cache.end()) {
++        return *it;
++    }
++    QPixmap pm(imgDir() + name + QStringLiteral(".png"));
++    cache.insert(name, pm);
++    return pm;
++}
++
++QIcon icon(const QString &name)
++{
++    static QHash<QString, QIcon> cache;
++    auto it = cache.find(name);
++    if (it != cache.end()) {
++        return *it;
++    }
++    QIcon ic;
++    const QDir d(imgDir() + QStringLiteral("icons"));
++    const auto files = d.entryList({name + QStringLiteral("-*.png")}, QDir::Files);
++    for (const QString &f : files) {
++        ic.addFile(d.filePath(f));
++    }
++    cache.insert(name, ic);
++    return ic;
++}
++
++void drawFrame(QPainter *p, const QRect &r, const QString &name, int l, int rgt, int t, int b)
++{
++    const QPixmap pm = pixmap(name);
++    if (pm.isNull() || r.isEmpty()) {
++        return;
++    }
++    const int W = pm.width(), H = pm.height();
++    const int xs[4] = {0, l, W - rgt, W}, ys[4] = {0, t, H - b, H};
++    const int dx[4] = {r.left(), r.left() + l, r.right() + 1 - rgt, r.right() + 1};
++    const int dy[4] = {r.top(), r.top() + t, r.bottom() + 1 - b, r.bottom() + 1};
++    for (int j = 0; j < 3; ++j) {
++        for (int i = 0; i < 3; ++i) {
++            const QRect src(xs[i], ys[j], xs[i + 1] - xs[i], ys[j + 1] - ys[j]);
++            const QRect dst(dx[i], dy[j], dx[i + 1] - dx[i], dy[j + 1] - dy[j]);
++            if (src.isEmpty() || dst.isEmpty()) {
++                continue;
++            }
++            p->drawPixmap(dst, pm, src);
++        }
++    }
++}
++}
+diff --git a/src/explorer7/e7assets.h b/src/explorer7/e7assets.h
+new file mode 100644
+index 0000000..18a998f
+--- /dev/null
++++ b/src/explorer7/e7assets.h
+@@ -0,0 +1,15 @@
++// explorer7: windows 7 pieces installed by explorer7's install.sh (~/.local/share/explorer7/img)
++#pragma once
++#include <QIcon>
++#include <QPixmap>
++#include <QString>
++class QPainter;
++
++namespace E7
++{
++QString imgDir();
++QPixmap pixmap(const QString &name);           // img/<name>.png, cached
++QIcon icon(const QString &name);               // img/icons/<name>-<size>.png (all sizes found)
++// 9-slice draw of img/<name>.png; margins = left, right, top, bottom
++void drawFrame(QPainter *p, const QRect &r, const QString &name, int l, int rgt, int t, int b);
++}
+diff --git a/src/explorer7/e7breadcrumb.cpp b/src/explorer7/e7breadcrumb.cpp
+new file mode 100644
+index 0000000..63938b8
+--- /dev/null
++++ b/src/explorer7/e7breadcrumb.cpp
+@@ -0,0 +1,149 @@
++#include "e7breadcrumb.h"
++#include "e7assets.h"
++
++#include <KUrlNavigator>
++#include <QTimer>
++#include <QUrl>
++#include <QAbstractButton>
++#include <QFontMetrics>
++#include <QChildEvent>
++#include <QEvent>
++#include <QPainter>
++#include <QPainterPath>
++
++namespace
++{
++bool isCrumb(const QObject *o) { return qstrcmp(o->metaObject()->className(), "KDEPrivate::KUrlNavigatorButton") == 0; }
++bool isPlaces(const QObject *o) { return qstrcmp(o->metaObject()->className(), "KDEPrivate::KUrlNavigatorPlacesSelector") == 0; }
++bool isDropDown(const QObject *o) { return qstrcmp(o->metaObject()->className(), "KDEPrivate::KUrlNavigatorDropDownButton") == 0; }
++bool isToggle(const QObject *o) { return qstrcmp(o->metaObject()->className(), "KDEPrivate::KUrlNavigatorToggleButton") == 0; }
++// explorer's breadcrumb separator: small black triangle pointing right
++void drawArrow(QPainter &p, int cx, int cy)
++{
++    p.save();
++    p.setRenderHint(QPainter::Antialiasing, false);
++    p.setPen(Qt::NoPen);
++    p.setBrush(Qt::black);
++    QPainterPath tri;
++    tri.moveTo(cx - 1, cy - 4); tri.lineTo(cx - 1, cy + 4); tri.lineTo(cx + 3, cy);
++    tri.closeSubpath();
++    p.drawPath(tri);
++    p.restore();
++}
++}
++
++E7Breadcrumb::E7Breadcrumb(KUrlNavigator *nav)
++    : QObject(nav)
++    , m_nav(nav)
++{
++    nav->installEventFilter(this);
++    nav->setFixedHeight(17); // inside the 23px AB::AddressBand box, like explorer
++    const auto kids = nav->findChildren<QObject *>();
++    for (QObject *c : kids) hook(c);
++    connect(nav, &KUrlNavigator::urlChanged, this, [this]() { QTimer::singleShot(0, this, &E7Breadcrumb::relayout); });
++    QTimer::singleShot(0, this, &E7Breadcrumb::relayout);
++}
++
++void E7Breadcrumb::relayout()
++{
++    // icon + ▸ when the whole path fits; icon + « when leading folders are hidden
++    QWidget *places = nullptr;
++    bool overflow = false;
++    for (QWidget *w : m_nav->findChildren<QWidget *>()) {
++        if (isPlaces(w)) places = w;
++        if (isDropDown(w) && w->isVisible()) overflow = true;
++    }
++    if (places) places->setFixedWidth(overflow ? 22 : 30);
++    // the last folder gets room for "name ▸" in regular weight (kio sized it for bold text without an arrow)
++    for (QAbstractButton *b : m_nav->findChildren<QAbstractButton *>()) {
++        if (!isCrumb(b)) continue;
++        const QString text = b->text().remove(QLatin1Char('&'));
++        QFont bold = b->font(); bold.setBold(true);
++        const bool last = b->sizeHint().width() == 5 + QFontMetrics(bold).size(Qt::TextSingleLine, text).width() + 5;
++        b->setMinimumWidth(last ? 5 + b->fontMetrics().horizontalAdvance(text) + 13 : 0);
++    }
++}
++
++void E7Breadcrumb::hook(QObject *child)
++{
++    if (child->property("e7hooked").toBool() || !(isCrumb(child) || isPlaces(child) || isDropDown(child) || isToggle(child))) return;
++    child->setProperty("e7hooked", true);
++    child->installEventFilter(this);
++    if (auto *w = qobject_cast<QWidget *>(child)) {
++        w->setAttribute(Qt::WA_Hover);
++        w->setMouseTracking(true);
++    }
++}
++
++bool E7Breadcrumb::eventFilter(QObject *watched, QEvent *event)
++{
++    if (event->type() == QEvent::ChildAdded || event->type() == QEvent::ChildPolished) {
++        hook(static_cast<QChildEvent *>(event)->child());
++        return false;
++    }
++    if (event->type() == QEvent::HoverMove || event->type() == QEvent::HoverEnter || event->type() == QEvent::HoverLeave) {
++        if (auto *w = qobject_cast<QWidget *>(watched)) w->update();
++        return false;
++    }
++    if (event->type() != QEvent::Paint) return false;
++    auto *b = qobject_cast<QAbstractButton *>(watched);
++    if (!b) return false;
++    QPainter p(b);
++    const int h = b->height();
++    if (isPlaces(b)) {
++        // explorer: the location's icon (magnifier on search results), then ▸
++        const bool search = m_nav->locationUrl().scheme().contains(QLatin1String("search"));
++        const QIcon ic = search ? QIcon(E7::pixmap(QStringLiteral("addr-search"))) : b->icon();
++        ic.paint(&p, QRect(3, (h - 16) / 2, 16, 16));
++        bool overflow = false;
++        for (QWidget *w : m_nav->findChildren<QWidget *>()) overflow |= isDropDown(w) && w->isVisible();
++        if (!overflow) drawArrow(p, 25, h / 2);
++        return true;
++    }
++    if (isDropDown(b)) {
++        // hidden leading folders: BreadcrumbBar overflow chevron «
++        const QPixmap g = E7::pixmap(b->underMouse() ? QStringLiteral("crumb-overflow-2") : QStringLiteral("crumb-overflow-1"));
++        p.drawPixmap((b->width() - g.width()) / 2, (h - g.height()) / 2, g);
++        return true;
++    }
++    if (isToggle(b)) {
++        // the empty part of the box: draws the trailing ▸ when the last crumb had no room for it
++        return true;
++    }
++    // kio sizes the current folder's button as padding + bold text + padding (no arrow); the others carry an arrow area (height/2)
++    const QString text = b->text().remove(QLatin1Char('&'));
++    const QFontMetrics fm(b->font());
++    QFont bold = b->font(); bold.setBold(true);
++    const int pad = 5, arrowW = qMax(4, h / 2);
++    const bool hasArrow = b->sizeHint().width() != pad + QFontMetrics(bold).size(Qt::TextSingleLine, text).width() + pad;
++    const QPoint m = b->mapFromGlobal(QCursor::pos());
++    const bool hot = b->underMouse() || b->isDown();
++    const int split = b->width() - (hasArrow ? arrowW + 2 : 0);
++    if (hot) {
++        // CommandModule split button hot frames: text part + arrow part (pressed frames while held)
++        const bool overArrow = hasArrow && m.x() >= split;
++        const int fl = b->isDown() && !overArrow ? 3 : 2, fr = b->isDown() && overArrow ? 3 : 2;
++        E7::drawFrame(&p, QRect(0, 0, hasArrow ? split : b->width(), h), QStringLiteral("cm-split-left-%1").arg(fl), 3, 2, 6, 6);
++        if (hasArrow) E7::drawFrame(&p, QRect(split, 0, b->width() - split, h), QStringLiteral("cm-split-right-%1").arg(fr), 1, 3, 6, 6);
++    }
++    p.setPen(Qt::black);
++    p.setFont(b->font());
++    p.drawText(QRect(pad, 0, split - pad, h), Qt::AlignVCenter | Qt::AlignLeft, fm.elidedText(text, Qt::ElideRight, split - pad - 1));
++    if (!hasArrow) {
++        // explorer ends the path with ▸ 7px after the last folder name; if the button is too narrow the empty area after it draws it
++        drawArrow(p, qMin(b->width() - 5, pad + fm.horizontalAdvance(text) + 7), h / 2);
++    }
++    if (hasArrow) {
++        // small black triangle pointing right (down while its menu is open)
++        p.setRenderHint(QPainter::Antialiasing, false);
++        p.setPen(Qt::NoPen);
++        p.setBrush(Qt::black);
++        const int cx = split + (b->width() - split) / 2, cy = h / 2;
++        QPainterPath tri;
++        if (b->isDown()) { tri.moveTo(cx - 3, cy - 1); tri.lineTo(cx + 4, cy - 1); tri.lineTo(cx, cy + 3); }
++        else { tri.moveTo(cx - 1, cy - 4); tri.lineTo(cx - 1, cy + 4); tri.lineTo(cx + 3, cy); }
++        tri.closeSubpath();
++        p.drawPath(tri);
++    }
++    return true;
++}
+diff --git a/src/explorer7/e7breadcrumb.h b/src/explorer7/e7breadcrumb.h
+new file mode 100644
+index 0000000..01193ac
+--- /dev/null
++++ b/src/explorer7/e7breadcrumb.h
+@@ -0,0 +1,17 @@
++// explorer7: paints kio's url navigator buttons like windows 7's breadcrumb bar
++#pragma once
++#include <QObject>
++class KUrlNavigator;
++
++class E7Breadcrumb : public QObject
++{
++    Q_OBJECT
++public:
++    explicit E7Breadcrumb(KUrlNavigator *nav);
++    bool eventFilter(QObject *watched, QEvent *event) override;
++
++private:
++    void hook(QObject *child);
++    void relayout();
++    KUrlNavigator *m_nav;
++};
+diff --git a/src/explorer7/e7detailspane.cpp b/src/explorer7/e7detailspane.cpp
+new file mode 100644
+index 0000000..63d072d
+--- /dev/null
++++ b/src/explorer7/e7detailspane.cpp
+@@ -0,0 +1,100 @@
++#include "e7detailspane.h"
++#include "e7assets.h"
++#include "views/dolphinview.h"
++
++#include <KFormat>
++#include <KLocalizedString>
++#include <QLocale>
++#include <QPainter>
++
++E7DetailsPane::E7DetailsPane(QWidget *parent)
++    : QWidget(parent)
++{
++    setObjectName(QStringLiteral("e7DetailsPane"));
++    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
++}
++
++QSize E7DetailsPane::sizeHint() const { return {400, 53}; }      // shellstyle: PreviewPaneSizer InitialSize 53
++QSize E7DetailsPane::minimumSizeHint() const { return {100, 53}; }
++
++void E7DetailsPane::setView(DolphinView *view)
++{
++    if (m_view) disconnect(m_view, nullptr, this, nullptr);
++    m_view = view;
++    if (view) {
++        connect(view, &DolphinView::selectionChanged, this, &E7DetailsPane::refresh);
++        connect(view, &DolphinView::itemCountChanged, this, &E7DetailsPane::refresh);
++        connect(view, &DolphinView::directoryLoadingCompleted, this, &E7DetailsPane::refresh);
++        connect(view, &DolphinView::urlChanged, this, &E7DetailsPane::refresh);
++    }
++    refresh();
++}
++
++void E7DetailsPane::refresh()
++{
++    m_props.clear();
++    m_subtitle.clear();
++    if (!m_view) { update(); return; }
++    const KFileItemList sel = m_view->selectedItems();
++    const QLocale loc;
++    if (sel.isEmpty()) {
++        const KFileItem root = m_view->rootItem();
++        m_icon = QIcon::fromTheme(root.isNull() ? QStringLiteral("folder") : root.iconName());
++        m_title = i18np("%1 item", "%1 items", m_view->itemsCount());
++    } else if (sel.count() == 1) {
++        const KFileItem &it = sel.first();
++        m_icon = QIcon::fromTheme(it.iconName());
++        m_title = it.text();
++        m_subtitle = it.isDir() ? i18n("File folder") : it.mimeComment();
++        m_props.append({i18n("Date modified:"), loc.toString(it.time(KFileItem::ModificationTime), QStringLiteral("M/d/yyyy h:mm AP"))});
++        if (!it.isDir()) m_props.append({i18n("Size:"), KFormat().formatByteSize(it.size())});
++        const QDateTime created = it.time(KFileItem::CreationTime);
++        if (created.isValid()) m_props.append({i18n("Date created:"), loc.toString(created, QStringLiteral("M/d/yyyy h:mm AP"))});
++    } else {
++        m_icon = QIcon::fromTheme(QStringLiteral("document-multiple"));
++        m_title = i18np("%1 item selected", "%1 items selected", sel.count());
++        KIO::filesize_t total = 0;
++        for (const KFileItem &it : sel) if (!it.isDir()) total += it.size();
++        if (total) m_props.append({i18n("Size:"), KFormat().formatByteSize(total)});
++    }
++    update();
++}
++
++void E7DetailsPane::paintEvent(QPaintEvent *)
++{
++    QPainter p(this);
++    // background: PreviewPane PREVIEWBACKGROUND (normal), 5px top edge then flat
++    const QPixmap bg = E7::pixmap(QStringLiteral("details-bg"));
++    if (!bg.isNull()) E7::drawFrame(&p, rect(), QStringLiteral("details-bg"), 0, 0, 5, 0);
++    else p.fillRect(rect(), QColor(0xf1, 0xf5, 0xfb));
++    const int iconSize = 40, x0 = 13;
++    m_icon.paint(&p, QRect(x0, (height() - iconSize) / 2, iconSize, iconSize));
++    QFont f = font();
++    const QFontMetrics fm(f);
++    const int tx = x0 + iconSize + 12, lh = fm.height();
++    // title (PreviewPane TITLE #000000), subtitle as a label colour line under it
++    p.setPen(Qt::black);
++    QFont tf = f; tf.setPointSizeF(f.pointSizeF() * 1.25);
++    p.setFont(tf);
++    const QFontMetrics tfm(tf);
++    const int ty = m_subtitle.isEmpty() && m_props.isEmpty() ? (height() - tfm.height()) / 2 : 6;
++    p.drawText(QRect(tx, ty, 260, tfm.height()), Qt::AlignLeft | Qt::AlignVCenter, tfm.elidedText(m_title, Qt::ElideRight, 260));
++    p.setFont(f);
++    if (!m_subtitle.isEmpty()) {
++        p.setPen(QColor(0x5a, 0x67, 0x79)); // PreviewPane LABEL
++        p.drawText(QRect(tx, ty + tfm.height(), 260, lh), Qt::AlignLeft | Qt::AlignVCenter, fm.elidedText(m_subtitle, Qt::ElideRight, 260));
++    }
++    // property columns: label (LABEL #5a6779, right aligned) + value (VALUE #1e395b)
++    int col = tx + 280, row = 0;
++    const int rowsPerCol = qMax(1, (height() - 8) / lh);
++    for (const auto &kv : std::as_const(m_props)) {
++        const int y = 4 + row * lh;
++        const int lw = fm.horizontalAdvance(kv.first);
++        p.setPen(QColor(0x5a, 0x67, 0x79));
++        p.drawText(QRect(col, y, 100, lh), Qt::AlignRight | Qt::AlignVCenter, kv.first);
++        p.setPen(QColor(0x1e, 0x39, 0x5b));
++        p.drawText(QRect(col + 106, y, 180, lh), Qt::AlignLeft | Qt::AlignVCenter, kv.second);
++        Q_UNUSED(lw)
++        if (++row >= rowsPerCol) { row = 0; col += 300; }
++    }
++}
+diff --git a/src/explorer7/e7detailspane.h b/src/explorer7/e7detailspane.h
+new file mode 100644
+index 0000000..a509a75
+--- /dev/null
++++ b/src/explorer7/e7detailspane.h
+@@ -0,0 +1,28 @@
++// explorer7: windows 7 details pane (bottom strip: big icon, name, properties)
++#pragma once
++#include <KFileItem>
++#include <QPointer>
++#include <QWidget>
++
++class DolphinView;
++
++class E7DetailsPane : public QWidget
++{
++    Q_OBJECT
++public:
++    explicit E7DetailsPane(QWidget *parent = nullptr);
++    void setView(DolphinView *view);
++    QSize sizeHint() const override;
++    QSize minimumSizeHint() const override;
++
++protected:
++    void paintEvent(QPaintEvent *event) override;
++
++private:
++    void refresh();
++    QPointer<DolphinView> m_view;
++    QIcon m_icon;
++    QString m_title;
++    QList<QPair<QString, QString>> m_props;
++    QString m_subtitle;
++};
+diff --git a/src/explorer7/e7navbar.cpp b/src/explorer7/e7navbar.cpp
+new file mode 100644
+index 0000000..41b695d
+--- /dev/null
++++ b/src/explorer7/e7navbar.cpp
+@@ -0,0 +1,197 @@
++#include "e7navbar.h"
++#include "e7assets.h"
++
++#include <KLocalizedString>
++#include <KToolBarPopupAction>
++#include <QAction>
++#include <QMenu>
++#include <QMouseEvent>
++#include <QPainter>
++#include <QWindow>
++
++namespace
++{
++// the 120 dpi bitmaps (ExplorerFrame 589 band, 585-588 orbs) on scaled screens, 96 dpi (280, 577-581) otherwise
++bool hiDpi(const QWidget *w) { return w->devicePixelRatioF() >= 1.2; }
++QPixmap scaled(const QWidget *w, const QString &base)
++{
++    const bool hi = hiDpi(w);
++    QPixmap pm = E7::pixmap(base + (hi ? QStringLiteral("-120") : QStringLiteral("-96")));
++    if (pm.isNull()) pm = E7::pixmap(base);
++    pm.setDevicePixelRatio(hi ? 1.25 : 1.0);
++    return pm;
++}
++}
++
++E7TravelBand::E7TravelBand(QAction *back, QAction *forward, QWidget *parent)
++    : QWidget(parent)
++    , m_back(back)
++    , m_forward(forward)
++{
++    setObjectName(QStringLiteral("e7TravelBand"));
++    setMouseTracking(true);
++    setAttribute(Qt::WA_TranslucentBackground);
++    setFixedSize(sizeHint());
++    for (QAction *a : {back, forward}) {
++        if (a) connect(a, &QAction::changed, this, qOverload<>(&QWidget::update));
++    }
++}
++
++E7TravelBand::Part E7TravelBand::partAt(const QPoint &p) const
++{
++    if (p.x() < 29) return Back;
++    if (p.x() < 54) return Forward;
++    if (p.x() < 77) return Recent;
++    return None;
++}
++
++void E7TravelBand::paintEvent(QPaintEvent *)
++{
++    QPainter p(this);
++    const bool backOn = m_back && m_back->isEnabled(), fwdOn = m_forward && m_forward->isEnabled();
++    // band: frame 0 without history, 1 with; its own arrow is cut off, explorer draws the drop-down from the theme
++    const bool any = backOn || fwdOn;
++    const QPixmap band = scaled(this, QStringLiteral("band"));
++    const qreal dpr = band.devicePixelRatio(), fw = band.width() / dpr / 4.0;
++    // the band starts 2px right of the back orb (its rounded end hides behind it), ends before its arrow at x 59
++    const qreal keep = 57;
++    p.drawPixmap(QRectF(2, 0, keep, band.height() / dpr), band, QRectF((any ? 1 : 0) * band.width() / 4.0, 0, keep * dpr, band.height()));
++    Q_UNUSED(fw);
++    // recent pages drop-down: aero.msstyles Navigation MENUBUTTON widened to 22px at x 54 (normal, hot glow, pressed, disabled)
++    int mf = 4;
++    if (any) mf = m_pressed == Recent ? 3 : m_hot == Recent ? 2 : 1;
++    const QPixmap menu = scaled(this, QStringLiteral("nav-menu-%1").arg(mf));
++    p.drawPixmap(QRectF(54, 2, 22, menu.height() / menu.devicePixelRatio()), menu, menu.rect());
++    // orbs: aero.msstyles Navigation BACKBUTTON / FORWARDBUTTON (30px, 38px at 120 dpi; frames normal, hot, pressed, disabled),
++    // forward at x 29 so the two overlap by 1px, back painted last on top, as in explorer
++    auto orb = [&](Part part, bool on) {
++        int st = 4;
++        if (on) st = m_pressed == part ? 3 : m_hot == part ? 2 : 1;
++        const QPixmap pm = scaled(this, QStringLiteral("%1-%2").arg(part == Back ? QStringLiteral("nav-back") : QStringLiteral("nav-fwd")).arg(st));
++        p.drawPixmap(QRectF(part == Back ? 0 : 29, 0, 30, 30), pm, pm.rect());
++    };
++    orb(Forward, fwdOn);
++    orb(Back, backOn);
++}
++
++void E7TravelBand::mouseMoveEvent(QMouseEvent *e)
++{
++    const Part h = partAt(e->pos());
++    if (h != m_hot) { m_hot = h; update(); }
++}
++
++void E7TravelBand::leaveEvent(QEvent *)
++{
++    m_hot = None;
++    update();
++}
++
++void E7TravelBand::mousePressEvent(QMouseEvent *e)
++{
++    if (e->button() != Qt::LeftButton) return;
++    m_pressed = partAt(e->pos());
++    update();
++    if (m_pressed == Recent) {
++        // recent pages: dolphin's back history menu (filled on aboutToShow)
++        if (auto *pa = qobject_cast<KToolBarPopupAction *>(m_back.data())) {
++            pa->popupMenu()->exec(mapToGlobal(QPoint(54, height())));
++        }
++        m_pressed = None;
++        update();
++    }
++}
++
++void E7TravelBand::mouseReleaseEvent(QMouseEvent *e)
++{
++    const Part p = partAt(e->pos());
++    if (p == m_pressed) {
++        if (p == Back && m_back && m_back->isEnabled()) m_back->trigger();
++        if (p == Forward && m_forward && m_forward->isEnabled()) m_forward->trigger();
++    }
++    m_pressed = None;
++    update();
++}
++
++// search box ----------------------------------------------------------------
++E7SearchBox::E7SearchBox(QWidget *parent)
++    : QLineEdit(parent)
++{
++    setObjectName(QStringLiteral("e7SearchBox"));
++    setFrame(false);
++    setAttribute(Qt::WA_Hover);
++    setMouseTracking(true);
++    setTextMargins(4, 0, 22, 0);
++    setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
++    setFixedSize(sizeHint());
++    QPalette pal = palette();
++    pal.setColor(QPalette::Base, Qt::transparent);
++    pal.setColor(QPalette::PlaceholderText, QColor(0x6d, 0x6d, 0x6d));
++    setPalette(pal);
++}
++
++QSize E7SearchBox::sizeHint() const { return {220, 23}; }   // SearchBox background is 23px tall
++
++void E7SearchBox::setPrompt(const QString &prompt) { setPlaceholderText(prompt); }
++
++QRect E7SearchBox::buttonRect() const { return QRect(width() - 22, 0, 22, height()); }
++
++void E7SearchBox::paintEvent(QPaintEvent *e)
++{
++    {
++        QPainter p(this);
++        // SearchBox background frames: 1 normal, 2 hot, 3 disabled, 4 focused (margins 3,5,5,5)
++        const int f = !isEnabled() ? 3 : hasFocus() ? 4 : m_hover ? 2 : 1;
++        E7::drawFrame(&p, rect(), QStringLiteral("sb-%1").arg(f), 3, 5, 5, 5);
++        // magnifier (34561) while empty, clear cross (34570 / hot 34571) while there is text
++        const QString g = text().isEmpty() ? QStringLiteral("sb-find") : (m_buttonHot ? QStringLiteral("sb-clear-hot") : QStringLiteral("sb-clear"));
++        const QPixmap gp = E7::pixmap(g);
++        const QRect br = buttonRect();
++        p.drawPixmap(br.left() + (br.width() - gp.width()) / 2, (height() - gp.height()) / 2, gp);
++    }
++    if (text().isEmpty() && !placeholderText().isEmpty()) {
++        // windows 7 draws the prompt in italic grey
++        QPainter p(this);
++        QFont f = font(); f.setItalic(true);
++        p.setFont(f);
++        p.setPen(QColor(0x6d, 0x6d, 0x6d));
++        p.drawText(rect().adjusted(6, 0, -24, 0), Qt::AlignVCenter | Qt::AlignLeft, fontMetrics().elidedText(placeholderText(), Qt::ElideRight, width() - 30));
++        const QString keep = placeholderText();
++        QSignalBlocker b(this);
++        setPlaceholderText(QString());
++        QLineEdit::paintEvent(e);
++        setPlaceholderText(keep);
++        return;
++    }
++    QLineEdit::paintEvent(e);
++}
++
++void E7SearchBox::mousePressEvent(QMouseEvent *e)
++{
++    if (buttonRect().contains(e->pos()) && !text().isEmpty()) {
++        clear();
++        Q_EMIT textEdited(QString());
++        return;
++    }
++    QLineEdit::mousePressEvent(e);
++}
++
++void E7SearchBox::mouseMoveEvent(QMouseEvent *e)
++{
++    const bool hot = buttonRect().contains(e->pos());
++    if (hot != m_buttonHot) { m_buttonHot = hot; update(); }
++    setCursor(hot && !text().isEmpty() ? Qt::ArrowCursor : Qt::IBeamCursor);
++    QLineEdit::mouseMoveEvent(e);
++}
++
++void E7SearchBox::enterEvent(QEnterEvent *e) { m_hover = true; update(); QLineEdit::enterEvent(e); }
++void E7SearchBox::leaveEvent(QEvent *e) { m_hover = false; m_buttonHot = false; update(); QLineEdit::leaveEvent(e); }
++
++void E7SearchBox::keyPressEvent(QKeyEvent *e)
++{
++    if (e->key() == Qt::Key_Escape && !text().isEmpty()) {
++        clear();
++        Q_EMIT textEdited(QString());
++        return;
++    }
++    QLineEdit::keyPressEvent(e);
++}
+diff --git a/src/explorer7/e7navbar.h b/src/explorer7/e7navbar.h
+new file mode 100644
+index 0000000..3499fbd
+--- /dev/null
++++ b/src/explorer7/e7navbar.h
+@@ -0,0 +1,50 @@
++// explorer7: windows 7 navigation bar pieces: travel band (back / forward / recent) and search box
++#pragma once
++#include <QLineEdit>
++#include <QPointer>
++#include <QWidget>
++
++class QAction;
++
++class E7TravelBand : public QWidget
++{
++    Q_OBJECT
++public:
++    E7TravelBand(QAction *back, QAction *forward, QWidget *parent = nullptr);
++    QSize sizeHint() const override { return {77, 30}; }   // band + 30px navigation orbs + 22px recent pages drop-down at x 54
++    QSize minimumSizeHint() const override { return sizeHint(); }
++
++protected:
++    void paintEvent(QPaintEvent *) override;
++    void mouseMoveEvent(QMouseEvent *) override;
++    void mousePressEvent(QMouseEvent *) override;
++    void mouseReleaseEvent(QMouseEvent *) override;
++    void leaveEvent(QEvent *) override;
++
++private:
++    enum Part { None, Back, Forward, Recent };
++    Part partAt(const QPoint &p) const;
++    QPointer<QAction> m_back, m_forward;
++    Part m_hot = None, m_pressed = None;
++};
++
++class E7SearchBox : public QLineEdit
++{
++    Q_OBJECT
++public:
++    explicit E7SearchBox(QWidget *parent = nullptr);
++    QSize sizeHint() const override;
++    void setPrompt(const QString &prompt);
++
++protected:
++    void paintEvent(QPaintEvent *) override;
++    void mousePressEvent(QMouseEvent *) override;
++    void mouseMoveEvent(QMouseEvent *) override;
++    void enterEvent(QEnterEvent *) override;
++    void leaveEvent(QEvent *) override;
++    void keyPressEvent(QKeyEvent *) override;
++
++private:
++    QRect buttonRect() const;
++    bool m_hover = false, m_buttonHot = false;
++};
+diff --git a/src/explorer7/e7navpane.cpp b/src/explorer7/e7navpane.cpp
+new file mode 100644
+index 0000000..3c7bc99
+--- /dev/null
++++ b/src/explorer7/e7navpane.cpp
+@@ -0,0 +1,217 @@
++#include "e7navpane.h"
++#include "e7assets.h"
++#include "dolphinplacesmodelsingleton.h"
++
++#include <KFilePlacesModel>
++#include <KLocalizedString>
++#include <QApplication>
++#include <QDir>
++#include <QHeaderView>
++#include <QMouseEvent>
++#include <QPainter>
++#include <QStandardPaths>
++#include <QSet>
++#include <QStyledItemDelegate>
++
++namespace
++{
++constexpr int RowHeight = 21;
++constexpr int UrlRole = Qt::UserRole + 1;
++constexpr int SpacerRole = Qt::UserRole + 2;
++// geometry measured on windows 7 explorer (96 dpi): x of glyph, icon, text per depth
++int glyphX(int depth) { return depth == 0 ? 0 : 12 * depth; }
++int iconX(int depth) { return 16 + 12 * depth; }
++int textX(int depth) { return iconX(depth) + (depth == 0 ? 22 : 19); }
++int depthOf(const QModelIndex &i) { int d = 0; for (QModelIndex p = i.parent(); p.isValid(); p = p.parent()) ++d; return d; }
++}
++
++class E7NavDelegate : public QStyledItemDelegate
++{
++public:
++    explicit E7NavDelegate(E7NavPane *pane) : QStyledItemDelegate(pane), m_pane(pane) {}
++
++    QSize sizeHint(const QStyleOptionViewItem &, const QModelIndex &) const override { return {100, RowHeight}; }
++
++    void paint(QPainter *p, const QStyleOptionViewItem &opt, const QModelIndex &index) const override
++    {
++        if (index.data(SpacerRole).toBool()) {
++            return;
++        }
++        p->save();
++        const int d = depthOf(index);
++        const QRect r = opt.rect;
++        const bool hot = opt.state & QStyle::State_MouseOver, sel = opt.state & QStyle::State_Selected;
++        const bool focus = m_pane->hasFocus();
++        // highlight starts just left of the icon and runs to the pane's edge (Explorer::TreeView TREEITEM, 3px margins)
++        const QRect hl(r.left() + iconX(d) - 3, r.top(), r.right() - (r.left() + iconX(d) - 3) - 1, r.height());
++        QString img;
++        if (sel && hot) img = QStringLiteral("tree-hotselected");
++        else if (sel) img = focus ? QStringLiteral("tree-selected") : QStringLiteral("tree-selectednotfocus");
++        else if (hot) img = QStringLiteral("tree-hot");
++        if (!img.isEmpty()) E7::drawFrame(p, hl, img, 3, 3, 3, 3);
++        // expand glyph: only while the mouse is over the pane, like explorer
++        QTreeWidgetItem *item = m_pane->itemFromIndex(index);
++        if (item && item->childCount() > 0 && m_pane->underMouse()) {
++            const bool open = item->isExpanded();
++            const QString g = QStringLiteral("%1-%2").arg(hot ? QStringLiteral("tree-hotglyph") : QStringLiteral("tree-glyph")).arg(open ? 2 : 1);
++            const QPixmap gp = E7::pixmap(g);
++            p->drawPixmap(r.left() + glyphX(d), r.top() + (r.height() - 16) / 2, 16, 16, gp);
++        }
++        const QIcon ic = index.data(Qt::DecorationRole).value<QIcon>();
++        ic.paint(p, QRect(r.left() + iconX(d), r.top() + (r.height() - 16) / 2, 16, 16));
++        p->setPen(QColor(0, 0, 0));
++        p->setFont(opt.font);
++        p->drawText(QRect(r.left() + textX(d), r.top(), r.width() - textX(d) - 4, r.height()), Qt::AlignVCenter | Qt::AlignLeft, opt.fontMetrics.elidedText(index.data().toString(), Qt::ElideRight, r.width() - textX(d) - 6));
++        p->restore();
++    }
++
++private:
++    E7NavPane *m_pane;
++};
++
++E7NavPane::E7NavPane(QWidget *parent)
++    : QTreeWidget(parent)
++    , m_closed{i18n("Computer")} // explorer's defaults: favorites and libraries open, computer closed
++{
++    setObjectName(QStringLiteral("e7NavPane"));
++    setHeaderHidden(true);
++    setIndentation(0);
++    setRootIsDecorated(false);
++    setFrameShape(QFrame::NoFrame);
++    setMouseTracking(true);
++    setUniformRowHeights(false);
++    setItemDelegate(new E7NavDelegate(this));
++    setFocusPolicy(Qt::StrongFocus);
++    setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
++    setAttribute(Qt::WA_Hover);
++    QPalette pal = palette();
++    pal.setColor(QPalette::Base, Qt::white);
++    pal.setColor(QPalette::Window, Qt::white);
++    setPalette(pal);
++    rebuild();
++    connect(this, &QTreeWidget::itemClicked, this, [this](QTreeWidgetItem *item) {
++        const QUrl u = item->data(0, UrlRole).toUrl();
++        if (u.isValid()) Q_EMIT placeActivated(u);
++    });
++    connect(this, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem *item) {
++        const QUrl u = item->data(0, UrlRole).toUrl();
++        if (u.isValid()) Q_EMIT placeActivated(u);
++    });
++    connect(this, &QTreeWidget::itemCollapsed, this, [this](QTreeWidgetItem *t) { m_closed.insert(t->text(0)); });
++    connect(this, &QTreeWidget::itemExpanded, this, [this](QTreeWidgetItem *t) { m_closed.remove(t->text(0)); });
++    auto *model = DolphinPlacesModelSingleton::instance().placesModel();
++    connect(model, &QAbstractItemModel::rowsInserted, this, &E7NavPane::rebuild);
++    connect(model, &QAbstractItemModel::rowsRemoved, this, &E7NavPane::rebuild);
++}
++
++QTreeWidgetItem *E7NavPane::addItem(QTreeWidgetItem *parent, const QString &text, const QString &icon, const QUrl &url, const QIcon &fallback)
++{
++    auto *it = parent ? new QTreeWidgetItem(parent) : new QTreeWidgetItem(this);
++    it->setText(0, text);
++    QIcon ic = E7::icon(icon);
++    it->setIcon(0, ic.isNull() ? fallback : ic);
++    it->setData(0, UrlRole, url);
++    return it;
++}
++
++void E7NavPane::addSpacer()
++{
++    auto *it = new QTreeWidgetItem(this);
++    it->setData(0, SpacerRole, true);
++    it->setFlags(Qt::NoItemFlags);
++}
++
++void E7NavPane::rebuild()
++{
++    const QUrl current = currentItem() ? currentItem()->data(0, UrlRole).toUrl() : QUrl();
++    clear();
++    auto loc = [](QStandardPaths::StandardLocation l) { return QUrl::fromLocalFile(QStandardPaths::writableLocation(l)); };
++    const QUrl home = QUrl::fromLocalFile(QDir::homePath());
++
++    auto *fav = addItem(nullptr, i18n("Favorites"), QStringLiteral("favorites"), home);
++    addItem(fav, i18n("Desktop"), QStringLiteral("desktop"), loc(QStandardPaths::DesktopLocation));
++    addItem(fav, i18n("Downloads"), QStringLiteral("downloads"), loc(QStandardPaths::DownloadLocation));
++    addItem(fav, i18n("Recent Places"), QStringLiteral("recentplaces"), QUrl(QStringLiteral("recentlyused:/locations/")));
++    addSpacer();
++    auto *lib = addItem(nullptr, i18n("Libraries"), QStringLiteral("libraries"), home);
++    addItem(lib, i18n("Documents"), QStringLiteral("documents"), loc(QStandardPaths::DocumentsLocation));
++    addItem(lib, i18n("Music"), QStringLiteral("music"), loc(QStandardPaths::MusicLocation));
++    addItem(lib, i18n("Pictures"), QStringLiteral("pictures"), loc(QStandardPaths::PicturesLocation));
++    addItem(lib, i18n("Videos"), QStringLiteral("videos"), loc(QStandardPaths::MoviesLocation));
++    addSpacer();
++    addItem(nullptr, i18n("Homegroup"), QStringLiteral("homegroup"), QUrl(QStringLiteral("remote:/")));
++    addSpacer();
++    auto *comp = addItem(nullptr, i18n("Computer"), QStringLiteral("computer"), QUrl(QStringLiteral("file:///")));
++    addItem(comp, i18n("Local Disk (C:)"), QStringLiteral("localdisk"), QUrl(QStringLiteral("file:///")));
++    // other drives from dolphin's places model (devices / removable devices)
++    auto *model = DolphinPlacesModelSingleton::instance().placesModel();
++    for (int row = 0; row < model->rowCount(); ++row) {
++        const QModelIndex i = model->index(row, 0);
++        const auto g = model->groupType(i);
++        if (g != KFilePlacesModel::DevicesType && g != KFilePlacesModel::RemovableDevicesType) continue;
++        const QUrl u = model->url(i);
++        if (u.isLocalFile() && u.toLocalFile() == QLatin1String("/")) continue;
++        addItem(comp, model->text(i), g == KFilePlacesModel::RemovableDevicesType ? QStringLiteral("removable") : QStringLiteral("drive"), u, model->icon(i));
++    }
++    addSpacer();
++    addItem(nullptr, i18n("Network"), QStringLiteral("network"), QUrl(QStringLiteral("remote:/")));
++    // explorer's defaults: favorites and libraries open, computer closed (remembered while dolphin runs)
++    for (int i = 0; i < topLevelItemCount(); ++i) {
++        QTreeWidgetItem *t = topLevelItem(i);
++        QSignalBlocker block(this);
++        t->setExpanded(!m_closed.contains(t->text(0)));
++    }
++    setCurrentItem(nullptr);
++    clearSelection();
++    if (current.isValid()) setUrl(current);
++}
++
++void E7NavPane::setUrl(const QUrl &url)
++{
++    QTreeWidgetItem *best = nullptr;
++    int bestLen = -1;
++    for (QTreeWidgetItemIterator it(this); *it; ++it) {
++        const QUrl u = (*it)->data(0, UrlRole).toUrl();
++        if (!u.isValid() || (*it)->parent() == nullptr) continue; // top-level items are not path targets
++        const QString a = u.adjusted(QUrl::StripTrailingSlash).toString(), b = url.adjusted(QUrl::StripTrailingSlash).toString();
++        if ((b == a || b.startsWith(a + QLatin1Char('/'))) && a.length() > bestLen) { best = *it; bestLen = a.length(); }
++    }
++    if (best && best != currentItem()) {
++        QSignalBlocker block(this);
++        setCurrentItem(best);
++    } else if (!best) {
++        QSignalBlocker block(this);
++        setCurrentItem(nullptr);
++        clearSelection();
++    }
++    viewport()->update();
++}
++
++QRect E7NavPane::glyphRect(QTreeWidgetItem *item) const
++{
++    const QRect r = visualItemRect(item);
++    const int d = depthOf(indexFromItem(item));
++    return QRect(r.left() + glyphX(d), r.top(), 16, r.height());
++}
++
++void E7NavPane::mousePressEvent(QMouseEvent *event)
++{
++    QTreeWidgetItem *item = itemAt(event->pos());
++    if (item && item->childCount() > 0 && glyphRect(item).contains(event->pos())) {
++        item->setExpanded(!item->isExpanded());
++        return;
++    }
++    QTreeWidget::mousePressEvent(event);
++}
++
++void E7NavPane::enterEvent(QEnterEvent *event)
++{
++    QTreeWidget::enterEvent(event);
++    viewport()->update();
++}
++
++void E7NavPane::leaveEvent(QEvent *event)
++{
++    QTreeWidget::leaveEvent(event);
++    viewport()->update();
++}
+diff --git a/src/explorer7/e7navpane.h b/src/explorer7/e7navpane.h
+new file mode 100644
+index 0000000..1b56345
+--- /dev/null
++++ b/src/explorer7/e7navpane.h
+@@ -0,0 +1,30 @@
++// explorer7: windows 7 navigation pane (Favorites, Libraries, Computer, Network)
++#pragma once
++#include <QSet>
++#include <QTreeWidget>
++#include <QUrl>
++
++class E7NavPane : public QTreeWidget
++{
++    Q_OBJECT
++public:
++    explicit E7NavPane(QWidget *parent = nullptr);
++    void setUrl(const QUrl &url);
++    void rebuild();
++
++Q_SIGNALS:
++    void placeActivated(const QUrl &url);
++
++protected:
++    void mousePressEvent(QMouseEvent *event) override;
++    void enterEvent(QEnterEvent *event) override;
++    void leaveEvent(QEvent *event) override;
++    void drawBranches(QPainter *, const QRect &, const QModelIndex &) const override {}
++
++private:
++    QTreeWidgetItem *addItem(QTreeWidgetItem *parent, const QString &text, const QString &icon, const QUrl &url, const QIcon &fallback = QIcon());
++    void addSpacer();
++    QRect glyphRect(QTreeWidgetItem *item) const;
++    QSet<QString> m_closed;
++    friend class E7NavDelegate;
++};
+diff --git a/src/kitemviews/kfileitemlistwidget.cpp b/src/kitemviews/kfileitemlistwidget.cpp
+index ccb1819..d509445 100644
+--- a/src/kitemviews/kfileitemlistwidget.cpp
++++ b/src/kitemviews/kfileitemlistwidget.cpp
+@@ -59,7 +59,11 @@ QString KFileItemListWidgetInformant::roleText(const QByteArray &role, const QHa
+                                                     forUsageAs == KStandardItemListWidgetInformant::ForUsageAs::DisplayedText ? QLocale::ShortFormat
+                                                                                                                               : QLocale::LongFormat);
+         } else {
+-            return local.toString(time, forUsageAs == KStandardItemListWidgetInformant::ForUsageAs::DisplayedText ? QLocale::ShortFormat : QLocale::LongFormat);
++            // explorer7: windows 7 short date + time (M/d/yyyy h:mm AM)
++            if (forUsageAs == KStandardItemListWidgetInformant::ForUsageAs::DisplayedText) {
++                return local.toString(time, QStringLiteral("M/d/yyyy h:mm AP"));
++            }
++            return local.toString(time, QLocale::LongFormat);
+         }
+     };
+ 
+diff --git a/src/kitemviews/kfileitemmodel.cpp b/src/kitemviews/kfileitemmodel.cpp
+index 5492177..efa433e 100644
+--- a/src/kitemviews/kfileitemmodel.cpp
++++ b/src/kitemviews/kfileitemmodel.cpp
+@@ -2319,10 +2319,10 @@ QHash<QByteArray, QVariant> KFileItemModel::retrieveData(const KFileItem &item,
+         data.insert(sharedValue("iconName"), iconName);
+ 
+         if (m_requestRole[TypeRole]) {
+-            data.insert(sharedValue("type"), item.mimeComment());
++            data.insert(sharedValue("type"), isDir ? i18nc("@item:intable", "File folder") : item.mimeComment()); // explorer7
+         }
+     } else if (m_requestRole[TypeRole] && isDir) {
+-        static const QString folderMimeType = item.mimeComment();
++        static const QString folderMimeType = i18nc("@item:intable", "File folder"); // explorer7: windows 7 wording
+         data.insert(sharedValue("type"), folderMimeType);
+     }
+ 
+@@ -3119,7 +3119,7 @@ const KFileItemModel::RoleInfoMap *KFileItemModel::rolesInfoMap(int &count)
+         { nullptr,               NoRole,                  KLazyLocalizedString(),                    KLazyLocalizedString(),        KLazyLocalizedString(),                    false,           false },
+         { "text",                NameRole,                kli18nc("@label", "Name"),                 KLazyLocalizedString(),        KLazyLocalizedString(),                    false,           false },
+         { "size",                SizeRole,                kli18nc("@label", "Size"),                 KLazyLocalizedString(),        KLazyLocalizedString(),                    false,           false },
+-        { "modificationtime",    ModificationTimeRole,    kli18nc("@label", "Modified"),             KLazyLocalizedString(),        kli18nc("@tooltip", "The date format can be selected in settings."),                    false,           false },
++        { "modificationtime",    ModificationTimeRole,    kli18nc("@label", "Date modified"),           KLazyLocalizedString(),        kli18nc("@tooltip", "The date format can be selected in settings."),                    false,           false },
+         { "creationtime",        CreationTimeRole,        kli18nc("@label", "Created"),              KLazyLocalizedString(),        kli18nc("@tooltip", "The date format can be selected in settings."),                    false,           false },
+         { "accesstime",          AccessTimeRole,          kli18nc("@label", "Accessed"),             KLazyLocalizedString(),        kli18nc("@tooltip", "The date format can be selected in settings."),                    false,           false },
+         { "type",                TypeRole,                kli18nc("@label", "Type"),                 KLazyLocalizedString(),        KLazyLocalizedString(),                    false,           false },
+diff --git a/src/kitemviews/kfileitemmodelrolesupdater.cpp b/src/kitemviews/kfileitemmodelrolesupdater.cpp
+index 6f86e1b..c9e317b 100644
+--- a/src/kitemviews/kfileitemmodelrolesupdater.cpp
++++ b/src/kitemviews/kfileitemmodelrolesupdater.cpp
+@@ -1196,7 +1196,7 @@ void KFileItemModelRolesUpdater::applySortRole(int index)
+             item.determineMimeType();
+         }
+ 
+-        data.insert("type", item.mimeComment());
++        data.insert("type", item.isDir() ? i18nc("@item:intable", "File folder") : item.mimeComment()); // explorer7
+     } else if (m_model->sortRole() == "size" && item.isLocalFile() && item.isDir()) {
+         startDirectorySizeCounting(item, index);
+         return;
+@@ -1365,7 +1365,7 @@ QHash<QByteArray, QVariant> KFileItemModelRolesUpdater::rolesData(const KFileIte
+     }
+ 
+     if (m_roles.contains("type")) {
+-        data.insert("type", item.mimeComment());
++        data.insert("type", item.isDir() ? i18nc("@item:intable", "File folder") : item.mimeComment()); // explorer7
+     }
+ 
+     QStringList overlays = item.overlays();
+diff --git a/src/kitemviews/private/kitemlistheaderwidget.cpp b/src/kitemviews/private/kitemlistheaderwidget.cpp
+index f385e66..5046217 100644
+--- a/src/kitemviews/private/kitemlistheaderwidget.cpp
++++ b/src/kitemviews/private/kitemlistheaderwidget.cpp
+@@ -5,6 +5,7 @@
+  * SPDX-License-Identifier: GPL-2.0-or-later
+  */
+ 
++#include <QStandardPaths>
+ #include "kitemlistheaderwidget.h"
+ #include "kitemviews/kitemmodelbase.h"
+ 
+@@ -458,9 +459,9 @@ void KItemListHeaderWidget::paintRole(QPainter *painter, const QByteArray &role,
+     if (m_pressedRoleIndex == orderIndex) {
+         option.state |= QStyle::State_Sunken;
+     }
+-    if (m_model->sortRole() == role) {
+-        option.sortIndicator = (m_model->sortOrder() == Qt::AscendingOrder) ? QStyleOptionHeader::SortDown : QStyleOptionHeader::SortUp;
+-    }
++    // explorer7: the style draws no sort indicator; windows 7's chevron is painted at the top centre below
++    const bool e7Sorted = m_model->sortRole() == role;
++    option.sortIndicator = QStyleOptionHeader::None;
+     option.rect = rect.toRect();
+     option.orientation = Qt::Horizontal;
+     option.selectedPosition = QStyleOptionHeader::NotAdjacent;
+@@ -503,6 +504,15 @@ void KItemListHeaderWidget::paintRole(QPainter *painter, const QByteArray &role,
+     }
+ 
+     style()->drawControl(QStyle::CE_Header, &option, painter, widget);
++    if (e7Sorted) {
++        // ItemsView::Header HEADERSORTARROW: frame 1 = ascending (points up), frame 2 = descending
++        static const QString dir = QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation) + QStringLiteral("/explorer7/img/");
++        const QPixmap arrow(dir + (m_model->sortOrder() == Qt::AscendingOrder ? QStringLiteral("hdr-sort-1.png") : QStringLiteral("hdr-sort-2.png")));
++        if (!arrow.isNull()) {
++            const QRect r = option.rect;
++            painter->drawPixmap(r.left() + (r.width() - arrow.width()) / 2, r.top(), arrow);
++        }
++    }
+ }
+ 
+ void KItemListHeaderWidget::updatePressedRoleIndex(const QPointF &pos)
+diff --git a/src/search/dolphinquery.cpp b/src/search/dolphinquery.cpp
+index 2db5746..0701fa0 100644
+--- a/src/search/dolphinquery.cpp
++++ b/src/search/dolphinquery.cpp
+@@ -378,10 +378,8 @@ QString DolphinQuery::title() const
+         // reuse the search term in the title if possible.
+         if (!m_searchTerm.isEmpty()) {
+             if (m_searchThrough == SearchThrough::FileNames) {
+-                return i18nc("@title of a search results page. %1 is the search term a user entered, %2 is a folder name",
+-                             "Search results for “%1” in %2",
+-                             m_searchTerm,
+-                             prettySearchLocation);
++                // explorer7: windows 7 wording
++                return i18nc("@title of a search results page. %1 is a folder name", "Search Results in %1", prettySearchLocation);
+             }
+             Q_ASSERT(m_searchThrough == SearchThrough::FileContents);
+             return i18nc("@title of a search results page. %1 is the search term a user entered, %2 is a folder name",

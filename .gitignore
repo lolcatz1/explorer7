@@ -1,0 +1,10 @@
+downloads/
+build/*
+!build/qss/
+!build/kvantum/
+!build/icons/
+out/
+.venv/
+ref/
+dolphin/
+dist/

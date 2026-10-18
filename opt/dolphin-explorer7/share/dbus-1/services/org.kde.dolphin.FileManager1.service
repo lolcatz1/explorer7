@@ -1,0 +1,4 @@
+[D-BUS Service]
+Name=org.freedesktop.FileManager1
+Exec=/home/levi/.local/opt/dolphin-explorer7/bin/dolphin --daemon
+SystemdService=plasma-dolphin.service
